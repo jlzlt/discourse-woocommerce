@@ -28,6 +28,11 @@ $product_group_map[] = (object) array('product_ids' => [], 'group_id' => 41, 'gr
  */
 add_filter( 'discourse_email_verification', '__return_false' );
 
+add_action( 'user_register', 'clear_discourse_email_not_verified', 99, 1 );
+function clear_discourse_email_not_verified( $user_id ) {
+    delete_user_meta( $user_id, 'discourse_email_not_verified' );
+}
+
 function get_discourse_group_ids($plan_id) {
 	global $member_group_map;
 	$group_ids = array();
