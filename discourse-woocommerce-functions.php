@@ -21,6 +21,13 @@ $member_group_map[] = (object) array('plan_id' => 76155, 'group_id' => 41, 'grou
 $product_group_map = array();
 $product_group_map[] = (object) array('product_ids' => [], 'group_id' => 41, 'group_name' => 'membership');
 
+/**
+ * Disable WP Discourse email verification requirement.
+ * WordPress/WooCommerce handles all email verification via Customer Email Verification plugin.
+ * All users authenticate via DiscourseConnect SSO - no local Discourse registrations.
+ */
+add_filter( 'discourse_email_verification', '__return_false' );
+
 function get_discourse_group_ids($plan_id) {
 	global $member_group_map;
 	$group_ids = array();
