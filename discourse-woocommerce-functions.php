@@ -102,10 +102,29 @@ function update_discourse_group_access($user_id, $action, $group_id)
 	$logger->info(sprintf('Updating discourse group access %s %s %s', $user_id, $action, $group_id));
 
 	if ($sso_provider) {
-		update_discourse_group_access_provider($user_id, $action, $group_id);
+		$result = update_discourse_group_access_provider($user_id, $action, $group_id);
 	} else if ($sso_client) {
-		update_discourse_group_access_client($user_id, $action, $group_id);
+		$result = update_discourse_group_access_client($user_id, $action, $group_id);
+	} else {
+		return null;
 	}
+
+	// WP Discourse returns true on success and a WP_Error on every failure, so
+	// without this check a rejected call is indistinguishable from a synced one
+	// in the log above.
+	if (is_wp_error($result)) {
+		$logger->error(
+			sprintf(
+				'FAILED %s user %s group %s: %s',
+				$action,
+				$user_id,
+				$group_id,
+				$result->get_error_message()
+			)
+		);
+	}
+
+	return $result;
 }
 
 function update_discourse_group_access_provider($user_id, $action, $group_id)
@@ -133,14 +152,24 @@ function update_discourse_group_access_provider($user_id, $action, $group_id)
 
 	if (!$group_name) {
 		$logger->info(sprintf('No group_name found for group_id %s - skipping provider sync', $group_id));
-		return;
+		return new \WP_Error(
+			'discourse_group_name_missing',
+			sprintf('No group_name is mapped for group_id %s.', $group_id)
+		);
 	}
 
+	// Both calls post the user's DiscourseConnect record to /admin/users/sync_sso
+	// with add_groups/remove_groups set, and return true or a WP_Error.
 	if ($action === 'PUT') {
-		DiscourseUtilities::add_user_to_discourse_group($user_id, $group_name);
+		return DiscourseUtilities::add_user_to_discourse_group($user_id, $group_name);
 	} else if ($action === 'DELETE') {
-		DiscourseUtilities::remove_user_from_discourse_group($user_id, $group_name);
+		return DiscourseUtilities::remove_user_from_discourse_group($user_id, $group_name);
 	}
+
+	return new \WP_Error(
+		'discourse_unknown_action',
+		sprintf('Unknown group action "%s" for user %s.', $action, $user_id)
+	);
 }
 
 function update_discourse_group_access_client($user_id, $action, $group_id)
@@ -321,11 +350,17 @@ function full_wc_membership_sync()
 			$logger->info(sprintf('Starting membership phase - total records to process: %s', (int) $count_query->found_posts));
 		}
 
+		// Page by a fixed order. get_posts() would otherwise sort newest first,
+		// so a membership created or removed mid-cycle shifts every later row
+		// and the offset lands past a record that was never processed. Sorting
+		// by ID also puts new memberships at the end, behind the offset.
 		$membership_ids = get_posts([
 			'post_type'       => 'wc_user_membership',
 			'post_status'     => 'any',
 			'posts_per_page'  => $batch_size,
 			'offset'          => $offset,
+			'orderby'         => 'ID',
+			'order'           => 'ASC',
 			'post_parent__in' => $plan_ids,
 			'fields'          => 'ids',
 		]);
@@ -426,7 +461,7 @@ function full_wc_membership_sync()
 	]);
 
 	if (empty($orders)) {
-		$logger->info('Full sync cycle complete - throttling for 24 hours');
+		$logger->info('Full sync cycle complete - throttling for 7 days');
 		update_option('discourse_sync_last_complete', time());
 		update_option('discourse_sync_offset', 0);
 		update_option('discourse_sync_order_offset', 0);
