@@ -48,8 +48,8 @@ function get_discourse_group_ids($plan_id)
 	return array_unique($group_ids);
 }
 
-const ACTIVE_STATUSES = array('wcm-active');
-const INACTIVE_STATUSES = array('wcm-expired', 'wcm-cancelled');
+const ACTIVE_STATUSES = array('wcm-active', 'wcm-complimentary', 'wcm-pending');
+const INACTIVE_STATUSES = array('wcm-expired', 'wcm-cancelled', 'wcm-paused');
 
 function get_user_group_action($user_id, $group_id)
 {
@@ -88,6 +88,16 @@ function update_discourse_group_access($user_id, $action, $group_id)
 	if (empty($options['url']) || empty($options['api-key']) || empty($options['publish-username']) || ! $sso_enabled) {
 		return new \WP_Error('discourse_configuration_error', 'The WP Discourse plugin has not been properly configured.');
 	}
+
+	// One membership event fires both the `..._saved` and `..._status_changed`
+	// hooks, which used to send the same request to Discourse twice. Skip a
+	// repeat of an identical call within the same PHP request.
+	static $sent = array();
+	$sent_key = $user_id . '|' . $group_id . '|' . $action;
+	if (isset($sent[$sent_key])) {
+		return;
+	}
+	$sent[$sent_key] = true;
 
 	$logger->info(sprintf('Updating discourse group access %s %s %s', $user_id, $action, $group_id));
 
@@ -211,11 +221,44 @@ function handle_wc_membership_saved($membership_plan, $args)
 	}
 };
 
+/**
+ * Push group changes to Discourse when a membership changes status.
+ *
+ * This is what removes forum access in real time: WooCommerce Memberships
+ * flips memberships to expired/cancelled via its own scheduler, which does
+ * not fire the `..._saved` hook — only this one.
+ */
 function handle_wc_membership_status_change($user_membership, $old_status, $new_status)
 {
 	$logger = wc_get_logger();
-	$logger->info(sprintf('Running handle_wc_membership_status_change %s, %s, %s', json_encode($user_membership), $old_status, $new_status));
-	return null;
+
+	$user_id = $user_membership->get_user_id();
+	$plan_id = $user_membership->get_plan_id();
+
+	if (! $user_id || ! $plan_id) {
+		return;
+	}
+
+	$group_ids = get_discourse_group_ids($plan_id);
+
+	if (empty($group_ids)) {
+		return; // Plan is not mapped to a Discourse group.
+	}
+
+	$logger->info(sprintf('Membership status changed for user %s (plan %s): %s -> %s', $user_id, $plan_id, $old_status, $new_status));
+
+	foreach ($group_ids as $group_id) {
+		// Re-evaluate across all plans mapped to this group, so a user who
+		// still holds another active membership in the group is not removed.
+		$action = get_user_group_action($user_id, $group_id);
+
+		if (! $action) {
+			$logger->info(sprintf('No action for user %s group %s after status change - skipping', $user_id, $group_id));
+			continue;
+		}
+
+		update_discourse_group_access($user_id, $action, $group_id);
+	}
 }
 
 add_action('wc_memberships_user_membership_saved', 'handle_wc_membership_saved', 10, 2);
@@ -234,8 +277,11 @@ function full_wc_membership_sync()
 		return;
 	}
 
+	// The full sync is only a backstop now - membership changes are pushed to
+	// Discourse in real time by handle_wc_membership_saved and
+	// handle_wc_membership_status_change.
 	$last_complete = (int) get_option('discourse_sync_last_complete', 0);
-	if ($last_complete > 0 && (time() - $last_complete) < DAY_IN_SECONDS) {
+	if ($last_complete > 0 && (time() - $last_complete) < WEEK_IN_SECONDS) {
 		return;
 	}
 
@@ -332,7 +378,7 @@ function full_wc_membership_sync()
 	}
 
 	if (!$has_configured_products) {
-		$logger->info('Full sync cycle complete (no products configured) - throttling for 24 hours');
+		$logger->info('Full sync cycle complete (no products configured) - throttling for 7 days');
 		update_option('discourse_sync_last_complete', time());
 		update_option('discourse_sync_offset', 0);
 		update_option('discourse_sync_order_offset', 0);
@@ -436,6 +482,22 @@ function handle_wc_membership_order_status_change($order_id, $old_status, $new_s
 {
 	global $product_group_map;
 	$logger = wc_get_logger();
+
+	// No products are mapped to Discourse groups, so there is nothing to match:
+	// skip before loading the order. This hook runs on every order status
+	// change, including checkout, where the order load and item dump below
+	// were pure overhead.
+	$has_mapped_products = false;
+	foreach ($product_group_map as $struct) {
+		if (!empty($struct->product_ids)) {
+			$has_mapped_products = true;
+			break;
+		}
+	}
+
+	if (! $has_mapped_products) {
+		return;
+	}
 
 	if ($new_status == "completed") {
 		$order = new WC_Order($order_id);
