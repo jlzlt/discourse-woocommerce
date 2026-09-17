@@ -85,6 +85,12 @@ function update_discourse_group_access($user_id, $action, $group_id)
 	$sso_client = $options['sso-client-enabled'];
 	$sso_enabled = $sso_secret_key && ($sso_provider || $sso_client);
 
+	// A restricted school account must not sit in a forum group: remove it instead of
+	// adding it. This also cleans up students who held a forum plan earlier.
+	if ('PUT' === $action && function_exists('mtz_edu_is_restricted') && mtz_edu_is_restricted($user_id, 'no_forum')) {
+		$action = 'DELETE';
+	}
+
 	if (empty($options['url']) || empty($options['api-key']) || empty($options['publish-username']) || ! $sso_enabled) {
 		return new \WP_Error('discourse_configuration_error', 'The WP Discourse plugin has not been properly configured.');
 	}
@@ -570,6 +576,13 @@ function matonizz_gate_discourse_sso($user_id, $user)
 		return;
 	}
 
+	// School accounts never reach the forum, whatever else they hold. The check lives
+	// in the Matonizz Education plugin; without it this file grants access as before.
+	if (function_exists('mtz_edu_is_restricted') && mtz_edu_is_restricted($user_id, 'no_forum')) {
+		wp_safe_redirect(home_url('/forum-school-accounts/'));
+		exit;
+	}
+
 	if (! function_exists('wc_memberships_get_user_membership')) {
 		return; // Memberships inactive; fail open. Change to redirect for fail-closed.
 	}
@@ -592,3 +605,17 @@ function matonizz_gate_discourse_sso($user_id, $user)
 }
 
 add_action('wpdc_sso_provider_before_sso_redirect', 'matonizz_gate_discourse_sso', 10, 2);
+
+/**
+ * Keep restricted school accounts out of Discourse even if "Create or Sync Discourse
+ * Users on Login" is switched on later.
+ */
+add_filter('wpdc_bypass_sync_sso', 'matonizz_bypass_sso_sync_for_school_accounts', 10, 2);
+function matonizz_bypass_sso_sync_for_school_accounts($bypass, $user_id)
+{
+	if (function_exists('mtz_edu_is_restricted') && mtz_edu_is_restricted($user_id, 'no_forum')) {
+		return true;
+	}
+
+	return $bypass;
+}
