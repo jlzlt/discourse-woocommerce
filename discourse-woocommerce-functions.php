@@ -571,16 +571,17 @@ add_action('woocommerce_order_status_changed', 'handle_wc_membership_order_statu
  */
 function matonizz_gate_discourse_sso($user_id, $user)
 {
-	// Let WordPress admins through so staff never get locked out.
-	if (user_can($user_id, 'manage_options')) {
-		return;
-	}
 
 	// School accounts never reach the forum, whatever else they hold. The check lives
 	// in the Matonizz Education plugin; without it this file grants access as before.
 	if (function_exists('mtz_edu_is_restricted') && mtz_edu_is_restricted($user_id, 'no_forum')) {
 		wp_safe_redirect(home_url('/forum-school-accounts/'));
 		exit;
+	}
+
+	// Let WordPress admins through so staff never get locked out.
+	if (user_can($user_id, 'manage_options')) {
+		return;
 	}
 
 	if (! function_exists('wc_memberships_get_user_membership')) {
